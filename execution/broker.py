@@ -145,6 +145,29 @@ class IBBroker:
 
     # --- Account and orders ------------------------------------------------
 
+    def get_account_id(self) -> str:
+        """Return the connected (first managed) account id, e.g. 'DU1234567'."""
+        self.ensure_connected()
+        return self.ib.managedAccounts()[0]
+
+    def get_positions(self) -> list[dict]:
+        """Return current open positions as a list of dicts (read-only).
+
+        Each entry is ``{symbol, shares, market_value}``. Returns an empty list
+        when there are no open positions. Places no orders.
+        """
+        self.ensure_connected()
+        positions = []
+        for item in self.ib.portfolio():
+            positions.append(
+                {
+                    "symbol": item.contract.symbol,
+                    "shares": item.position,
+                    "market_value": item.marketValue,
+                }
+            )
+        return positions
+
     def get_account_summary(self) -> dict[str, float]:
         """Return net liquidation, available funds, and buying power.
 

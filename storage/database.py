@@ -59,3 +59,34 @@ def save_watchlist(
 
     log.info("Saved %d watchlist rows to %s (run %s).", len(rows), db_path, run_timestamp)
     return run_timestamp
+
+
+def load_latest_watchlist(db_path: Path = DEFAULT_DB_PATH) -> pd.DataFrame:
+    """Load the watchlist rows from the most recent run.
+
+    Returns the rows for the latest ``run_timestamp``, sorted best momentum first,
+    or an empty DataFrame if the database/table is missing or has no rows.
+    """
+    if not Path(db_path).exists():
+        log.warning("Database %s does not exist; no watchlist to load.", db_path)
+        return pd.DataFrame()
+
+    connection = sqlite3.connect(db_path)
+    try:
+        latest = connection.execute("SELECT MAX(run_timestamp) FROM watchlist").fetchone()[0]
+        if latest is None:
+            log.warning("Watchlist table is empty.")
+            return pd.DataFrame()
+        rows = pd.read_sql_query(
+            "SELECT * FROM watchlist WHERE run_timestamp = ? ORDER BY momentum_score DESC",
+            connection,
+            params=(latest,),
+        )
+    except sqlite3.OperationalError:
+        log.warning("No watchlist table found in %s.", db_path)
+        return pd.DataFrame()
+    finally:
+        connection.close()
+
+    log.info("Loaded %d watchlist rows from run %s.", len(rows), latest)
+    return rows
