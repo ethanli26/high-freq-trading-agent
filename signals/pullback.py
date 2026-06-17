@@ -25,7 +25,7 @@ class PullbackStrategy(Strategy):
 
     name = "pullback"
 
-    def generate_signal(self, bars: pd.DataFrame) -> bool:
+    def generate_signal(self, bars: pd.DataFrame, symbol: str | None = None) -> bool:
         """Canonical rule on completed bars.
 
         LOOK-AHEAD SAFETY: only the passed-in bars are used, and the latest
@@ -57,7 +57,7 @@ class PullbackStrategy(Strategy):
 
         return bool(uptrend and touched and bounce)
 
-    def signal_series(self, bars: pd.DataFrame) -> pd.Series:
+    def signal_series(self, bars: pd.DataFrame, symbol: str | None = None) -> pd.Series:
         """Vectorized pullback signal; equals generate_signal at each bar."""
         close = bars["Close"]
         low = bars["Low"]

@@ -20,11 +20,11 @@ class BreakoutStrategy(Strategy):
 
     name = "breakout"
 
-    def generate_signal(self, bars: pd.DataFrame) -> bool:
+    def generate_signal(self, bars: pd.DataFrame, symbol: str | None = None) -> bool:
         """Canonical rule — identical to signals/entry.breakout_signal."""
         return breakout_signal(bars)
 
-    def signal_series(self, bars: pd.DataFrame) -> pd.Series:
+    def signal_series(self, bars: pd.DataFrame, symbol: str | None = None) -> pd.Series:
         """Vectorized breakout flag, equal to generate_signal at each bar.
 
         ``prior_high[t]`` is the max close over ``[t-lookback, t-1]`` (today

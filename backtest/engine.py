@@ -30,6 +30,13 @@ from config import (
     CHANDELIER_ATR_MULT,
     CONVICTION_SIZING_ENABLED,
     CRASH_BLOCK_NEW_ENTRIES,
+    EARNINGS_BLACKOUT_DAYS,
+    EARNINGS_BLACKOUT_ENABLED,
+    LIQUIDITY_LOOKBACK,
+    MAX_ADV_PARTICIPATION,
+    MIN_DOLLAR_VOLUME,
+    MIN_PRICE,
+    OVERLAY_ENABLED,
     REGIME_FILTER_ENABLED,
     TREND_EXIT_ENABLED,
     TREND_EXIT_MA,
@@ -96,14 +103,22 @@ def _build_panels(
     and signals equal the live per-bar functions; reindexing afterward leaves NaN on
     dates a symbol had no data (so it is simply untradeable then).
     """
+    n_days = len(master)
     panels: dict[str, dict] = {}
     for symbol, frame in bars.items():
         close, high, low, open_ = frame["Close"], frame["High"], frame["Low"], frame["Open"]
         atr = atr_series(high, low, close, ATR_PERIOD)
         mom = momentum_series(close)
         trend_ma = close.rolling(TREND_EXIT_MA).mean()  # MA for the trend-riding exit
+        # Average daily dollar volume for the liquidity filter (NaN if no Volume).
+        # LOOK-AHEAD GUARD: a trailing mean of completed bars; read at p when used.
+        if "Volume" in frame.columns:
+            dollar_volume = close * frame["Volume"]
+            adv = dollar_volume.rolling(LIQUIDITY_LOOKBACK).mean().reindex(master).to_numpy(dtype=float)
+        else:
+            adv = np.full(n_days, np.nan)
         signals = {
-            strat.name: strat.signal_series(frame).reindex(master, fill_value=False).to_numpy(dtype=bool)
+            strat.name: strat.signal_series(frame, symbol).reindex(master, fill_value=False).to_numpy(dtype=bool)
             for strat in strategies
         }
         # Per-strategy trigger strength (0..1) for conviction sizing.
@@ -119,6 +134,7 @@ def _build_panels(
             "atr": atr.reindex(master).to_numpy(dtype=float),
             "mom": mom.reindex(master).to_numpy(dtype=float),
             "trend_ma": trend_ma.reindex(master).to_numpy(dtype=float),
+            "adv": adv,
             "signals": signals,
             "strength": strength,
         }
@@ -177,6 +193,15 @@ def run_engine(
     enforce_min_size: bool = True,
     trend_exit: bool = TREND_EXIT_ENABLED,
     conviction_sizing: bool = CONVICTION_SIZING_ENABLED,
+    start_date: pd.Timestamp | None = None,
+    entry_filter=None,
+    earnings_dates: dict | None = None,
+    earnings_blackout: bool = EARNINGS_BLACKOUT_ENABLED,
+    blackout_days: int = EARNINGS_BLACKOUT_DAYS,
+    liquidity_filter: bool = False,
+    stats: dict | None = None,
+    overlay: bool = OVERLAY_ENABLED,
+    overlay_returns: np.ndarray | None = None,
 ) -> tuple[pd.Series, pd.DataFrame]:
     """Run the walk-forward backtest.
 
@@ -195,6 +220,24 @@ def run_engine(
             trail plus a trend-MA-break exit. When False, the standard trail is used.
         conviction_sizing: when True, scale per-trade risk by a conviction multiplier
             (before caps). When False, sizing is unchanged.
+        start_date: if given, only trade/record from this date on (indicators still
+            use full history). Used to backtest a held-out test period only.
+        entry_filter: optional ``f(symbol, signal_date, strategy) -> bool``; when it
+            returns False the candidate is skipped (e.g. an ML signal-quality gate).
+        earnings_dates: optional ``{symbol: array of report Timestamps}`` for the
+            earnings blackout (next-report dates are public in advance).
+        earnings_blackout: when True, refuse new entries within ``blackout_days``
+            sessions before a symbol's next known report (avoid holding through it).
+        blackout_days: blackout width in trading sessions.
+        liquidity_filter: when True, require trailing avg dollar volume >=
+            MIN_DOLLAR_VOLUME and price >= MIN_PRICE before entry, and cap a position
+            at MAX_ADV_PARTICIPATION of ADV (skip reason "illiquid").
+        stats: optional dict that, if given, receives run counters (e.g.
+            ``illiquid_skips``).
+        overlay: when True, idle cash is invested in the overlay instrument and earns
+            its daily return (marked to market at the close) instead of earning 0.
+        overlay_returns: the overlay instrument's daily returns aligned to ``master``
+            (required when ``overlay`` is True).
 
     Returns:
         ``(equity_curve, trades)`` — a daily equity Series and a trade-log DataFrame.
@@ -210,13 +253,27 @@ def run_engine(
     # Only screener constituents we actually loaded are tradable candidates.
     tradable = [s for s in sector_map if s in panels]
 
+    # Map each symbol's report dates to sorted master positions for the blackout.
+    blackout_pos: dict[str, np.ndarray] = {}
+    if earnings_blackout and earnings_dates:
+        for symbol, dates in earnings_dates.items():
+            if len(dates) == 0:
+                continue
+            positions = master.searchsorted(np.sort(pd.DatetimeIndex(dates).to_numpy()))
+            blackout_pos[symbol] = np.asarray(positions)
+
     cash = starting_equity
     book: dict[str, dict] = {}
     trades: list[dict] = []
     equity_dates: list = []
     equity_values: list[float] = []
+    illiquid_skips = 0
 
     start_index = max(warmup_bars, 1)
+    if start_date is not None:
+        # Trade/record only from start_date on; indicators above still use full
+        # history. This isolates a held-out test period without losing warmup.
+        start_index = max(start_index, int(master.searchsorted(pd.Timestamp(start_date))))
     for i in range(start_index, n_days):
         p = i - 1
 
@@ -268,6 +325,30 @@ def run_engine(
                 if sector_rank is None:
                     continue
 
+                # Liquidity gate (all strategies). LOOK-AHEAD GUARD: ADV and price are
+                # read at the prior bar p. Require enough dollar volume and a min price
+                # so we don't model trades we couldn't realistically fill.
+                adv_p = panel["adv"][p]
+                if liquidity_filter:
+                    if np.isnan(adv_p) or adv_p < MIN_DOLLAR_VOLUME or panel["close"][p] < MIN_PRICE:
+                        illiquid_skips += 1
+                        continue
+
+                # Earnings blackout (all strategies): refuse to ENTER within
+                # blackout_days sessions before this symbol's next known report, so
+                # we never hold a fresh position through an announcement. The entry
+                # would fill at i; report positions are known in advance (public).
+                if symbol in blackout_pos:
+                    rp = blackout_pos[symbol]
+                    k = int(np.searchsorted(rp, i, side="left"))  # first report at/after entry
+                    if k < len(rp) and 0 <= rp[k] - i <= blackout_days:
+                        continue
+
+                # Optional external entry filter (e.g. an ML signal-quality gate),
+                # evaluated on the signal day p. Returning False skips this entry.
+                if entry_filter is not None and not entry_filter(symbol, master[p], triggered):
+                    continue
+
                 # Conviction sizing: scale per-trade risk by the setup's strength.
                 # LOOK-AHEAD GUARD: rank, momentum, and signal strength all read at p.
                 if conviction_sizing:
@@ -284,6 +365,11 @@ def run_engine(
                 shares, _ = size_position(equity_prev, entry_fill, stop, risk_mult)  # 1% risk x conviction, 10% cap
                 if size_mult != 1.0:  # bear: scale the share size down
                     shares = int(math.floor(shares * size_mult))
+                # Liquidity cap: a position may not exceed MAX_ADV_PARTICIPATION of the
+                # name's average daily dollar volume (don't model unfillable size).
+                if liquidity_filter and entry_fill > 0:
+                    max_shares_adv = int(math.floor(MAX_ADV_PARTICIPATION * adv_p / entry_fill))
+                    shares = min(shares, max_shares_adv)
                 if shares <= 0:
                     continue
                 candidates.append({
@@ -392,6 +478,15 @@ def run_engine(
             close_i = panels[symbol]["close"][i]
             if not np.isnan(close_i):
                 position["last_close"] = close_i
+
+        # Index overlay: idle cash earns the overlay instrument's day-i return.
+        # LOOK-AHEAD GUARD: overlay_returns[i] is day i's return, applied only to the
+        # day-i equity mark (reporting). equity_prev used for sizing is as-of p, so no
+        # future info enters any decision. (Intraday flow timing is approximated at
+        # the daily close: today's entries are removed before growth, exits after.)
+        if overlay and overlay_returns is not None and not np.isnan(overlay_returns[i]):
+            cash *= 1.0 + overlay_returns[i]
+
         equity_values.append(cash + sum(pos["shares"] * pos["last_close"] for pos in book.values()))
         equity_dates.append(master[i])
 
@@ -406,6 +501,8 @@ def run_engine(
         trades.append(_record_trade(position, final_i, exit_fill, "end_of_backtest", master))
         del book[symbol]
 
+    if stats is not None:
+        stats["illiquid_skips"] = illiquid_skips
     equity_curve = pd.Series(equity_values, index=pd.DatetimeIndex(equity_dates), name="equity")
     trades_df = pd.DataFrame(trades, columns=TRADE_COLUMNS)
     log.info("Backtest complete: %d trades, final equity $%s.",

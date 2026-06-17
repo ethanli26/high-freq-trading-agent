@@ -87,6 +87,34 @@ CONVICTION_SIZING_ENABLED = _env_bool("CONVICTION_SIZING_ENABLED", True)
 CONVICTION_MAX_MULT = float(os.getenv("CONVICTION_MAX_MULT", "2.0"))   # strongest setups up to 2x base risk
 CONVICTION_MIN_MULT = float(os.getenv("CONVICTION_MIN_MULT", "0.5"))   # weakest qualifying setups down to 0.5x
 
+# --- Earnings catalyst (post-earnings-announcement drift) ---
+# Enter AFTER a positive-surprise report; never hold through the announcement.
+EARNINGS_SURPRISE_MIN = float(os.getenv("EARNINGS_SURPRISE_MIN", "0.05"))      # >=5% positive EPS surprise
+EARNINGS_ENTRY_DELAY_DAYS = int(os.getenv("EARNINGS_ENTRY_DELAY_DAYS", "1"))   # signal session(s) AFTER the report
+EARNINGS_CONFIRM_UP = _env_bool("EARNINGS_CONFIRM_UP", True)                   # post-report session must close up
+EARNINGS_BACKTEST_YEARS = int(os.getenv("EARNINGS_BACKTEST_YEARS", "7"))       # earnings-data window (free depth limited)
+
+# Earnings blackout: never ENTER a new position within this many sessions before a
+# known upcoming report (so price strategies don't hold through an announcement).
+EARNINGS_BLACKOUT_ENABLED = _env_bool("EARNINGS_BLACKOUT_ENABLED", True)
+EARNINGS_BLACKOUT_DAYS = int(os.getenv("EARNINGS_BLACKOUT_DAYS", "2"))
+
+# --- Liquidity filter (so we don't model trades we couldn't fill) ---
+MIN_DOLLAR_VOLUME = float(os.getenv("MIN_DOLLAR_VOLUME", "5000000"))        # >= $5M avg daily $ volume
+MIN_PRICE = float(os.getenv("MIN_PRICE", "5.0"))                           # avoid sub-$5 names
+LIQUIDITY_LOOKBACK = int(os.getenv("LIQUIDITY_LOOKBACK", "20"))
+MAX_ADV_PARTICIPATION = float(os.getenv("MAX_ADV_PARTICIPATION", "0.01"))  # cap a position at 1% of ADV
+
+# --- Realistic per-side slippage (basis points) by size tier ---
+# Less-liquid tiers cost more to trade; applied on both entry and exit.
+SLIPPAGE_BPS_LARGE = float(os.getenv("SLIPPAGE_BPS_LARGE", "5"))
+SLIPPAGE_BPS_MID = float(os.getenv("SLIPPAGE_BPS_MID", "15"))
+SLIPPAGE_BPS_SMALL = float(os.getenv("SLIPPAGE_BPS_SMALL", "40"))
+
+# --- Index overlay (deploy idle cash into the market instead of holding cash) ---
+OVERLAY_ENABLED = _env_bool("OVERLAY_ENABLED", False)
+OVERLAY_INSTRUMENT = os.getenv("OVERLAY_INSTRUMENT", "SPY")
+
 # --- Execution safety ---
 # When True, the decision runner prints proposals but places no orders.
 DRY_RUN = _env_bool("DRY_RUN", True)

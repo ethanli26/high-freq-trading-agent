@@ -10,8 +10,10 @@ A strategy is a small object with a ``name`` and two equivalent ways to ask
     boolean series, which the backtest engine consumes for speed. It MUST equal
     ``generate_signal`` evaluated bar by bar (the backtest verifies this).
 
-Both use only completed bars — no look-ahead. New strategies just subclass this and
-implement the two methods.
+Both use only completed bars — no look-ahead. The optional ``symbol`` argument lets
+strategies that need per-symbol side data (e.g. earnings dates) look it up; purely
+price-based strategies ignore it. New strategies subclass this and implement the
+two methods.
 """
 
 from abc import ABC, abstractmethod
@@ -25,11 +27,11 @@ class Strategy(ABC):
     name: str
 
     @abstractmethod
-    def generate_signal(self, bars: pd.DataFrame) -> bool:
+    def generate_signal(self, bars: pd.DataFrame, symbol: str | None = None) -> bool:
         """Return True if there is an entry signal on the latest completed bar."""
 
     @abstractmethod
-    def signal_series(self, bars: pd.DataFrame) -> pd.Series:
+    def signal_series(self, bars: pd.DataFrame, symbol: str | None = None) -> pd.Series:
         """Per-bar boolean signal; must equal ``generate_signal`` at each bar."""
 
     def strength_series(self, bars: pd.DataFrame) -> pd.Series:
