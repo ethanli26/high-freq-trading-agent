@@ -70,15 +70,12 @@ Goal: only after Phase 3 has a baseline. Frame it as "is this signal real or noi
 ### Phase 5 — Dashboard, monitoring, and graduating autonomy
 Goal: Streamlit dashboard for the watchlist, open positions, and the trade log. Alerts. Once a strategy has a real paper track record, graduate it from `approve` to `semi_auto` within tight limits.
 
-## First Claude Code prompts
+## Project layout
 
-Paste these one at a time. Finish and test each before the next.
-
-### Prompt 1 — scaffold
+The system is a Python 3.11+ package organized by responsibility, with secrets loaded
+from a `.env` file (never hardcoded) and a `.gitignore` that excludes `.env` and `logs`:
 
 ```
-Set up a Python project for a swing trading agent. Use Python 3.11+. Create this structure:
-
 trading-agent/
   config.py          # settings: autonomy_mode, risk_per_trade, paper port, API keys from env
   data/              # data fetching (yfinance, finnhub)
@@ -94,33 +91,27 @@ trading-agent/
   requirements.txt
   .env.example
   README.md
-
-requirements: ib_async, yfinance, finnhub-python, pandas, numpy, vectorbt, python-dotenv.
-Load all secrets from a .env file, never hardcode keys. Add a .gitignore that excludes .env and logs.
-Write a short README explaining how to run it.
 ```
 
-### Prompt 2 — IBKR paper connection
+Core dependencies: `ib_async`, `yfinance`, `finnhub-python`, `pandas`, `numpy`,
+`vectorbt`, `python-dotenv`.
 
-```
-In execution/, write an ib_async wrapper that connects to IBKR paper trading on 127.0.0.1 port 7497.
-Expose: connect(), get_account_summary(), place_market_order(symbol, qty, action), and disconnect().
-Add reconnection handling so a dropped connection retries with backoff.
-Write a small script that connects, prints the account summary, and exits. Do not place any orders in this script.
-Keep the code simple and readable with descriptive variable names. Add docstrings.
-```
+## Core components
 
-### Prompt 3 — sector screener
+### Broker connection (`execution/`)
+An `ib_async` wrapper connects to IBKR paper trading on `127.0.0.1:7497` and exposes
+`connect()`, `get_account_summary()`, `place_market_order(symbol, qty, action)`, and
+`disconnect()`. A dropped connection retries with backoff. The connection is verified
+with a read-only script that connects, prints the account summary, and exits without
+placing any orders.
 
-```
-In screener/, build a cross-sectional sector momentum ranker.
-Pull daily bars for these 11 SPDR sector ETFs with yfinance: XLK XLF XLE XLV XLY XLP XLI XLB XLU XLRE XLC.
-Compute 3-month and 6-month total return for each, rank them, and select the top 3 sectors.
-Then for each selected sector, take a hardcoded list of a few large constituents (I will refine this later),
-pull their bars, and rank them by the same momentum measure.
-Output a ranked watchlist as a pandas DataFrame and save it to the sqlite store.
-No trading logic here. Keep it readable, avoid heavy vectorization tricks.
-```
+### Sector screener (`screener/`)
+A cross-sectional sector momentum ranker. It pulls daily bars for the 11 SPDR sector
+ETFs (XLK XLF XLE XLV XLY XLP XLI XLB XLU XLRE XLC) via yfinance, computes 3-month and
+6-month total return for each, ranks them, and selects the top 3 sectors. For each
+selected sector it ranks a list of large constituents by the same momentum measure and
+outputs a ranked watchlist as a pandas DataFrame, persisted to the sqlite store. The
+screener contains no trading logic.
 
 ## Guardrails to keep in mind
 

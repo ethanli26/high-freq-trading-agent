@@ -1,5 +1,9 @@
 # Swing Trading Agent
 
+<!-- Replace OWNER/REPO with your GitHub path once pushed. -->
+![CI](https://github.com/OWNER/REPO/actions/workflows/ci.yml/badge.svg)
+![coverage](https://img.shields.io/badge/coverage-pytest--cov-blue)
+
 A personal swing trading agent that screens the market top-down (sectors first, then names), generates signals, gates every trade through an adjustable autonomy control, and executes on Interactive Brokers. Built paper-first.
 
 See `PROJECT_PLAN.md` for the full stack, roadmap, and design decisions.
@@ -39,11 +43,39 @@ See `PROJECT_PLAN.md` for the full stack, roadmap, and design decisions.
 
 ## Running
 
-Make sure TWS or IB Gateway is running and connected to your paper account before running anything that touches the broker.
+`main.py` is the single entry point with four subcommands:
 
 ```
-python main.py
+python main.py research   # full research pipeline -> consolidated report + artifacts
+python main.py backtest   # canonical best-config backtest + benchmark comparison
+python main.py factors    # factor IC evaluation scorecard
+python main.py live       # paper decision loop (needs TWS/IB Gateway on the paper port)
 ```
+
+Make sure TWS or IB Gateway is running and connected to your paper account before running `live` (or anything that touches the broker).
+
+## Testing
+
+The core math and the safety guards are covered by an offline, deterministic pytest
+suite (no network). Install the dev deps and run it:
+
+```
+pip install -r requirements-dev.txt
+pytest                              # full suite (the regression test needs a local price cache)
+pytest -m "not slow and not network"   # the fast, offline suite that CI runs
+```
+
+What's covered:
+
+- **risk/** — position sizing (1% risk, per-name and portfolio caps, min-size floor), ATR/stop math, conviction multiplier bounds.
+- **signals/** — breakout (including the exclude-today window), the pullback rule, and the earnings-drift guard (never enters on/before the report date).
+- **factors/** — NCSKEW/DUVOL formula fidelity and the look-ahead-safety property (factor value at *t* is unchanged when future bars are dropped).
+- **backtest engine** — a synthetic scenario proving next-day-open entry fills and stop exits.
+- **intraday engine** — event ordering, incremental rolling-state correctness, out-of-order/duplicate-bar handling, and deterministic signals/fills on a synthetic minute series.
+- **safety guards** — the DU-account (paper-only) guard and `DRY_RUN` both block order placement and cannot be bypassed (broker mocked; no live connection).
+- **regression** (marked `slow`/`network`, skipped in CI) — the canonical backtest reproduces 1675 trades / $1,967,830.
+
+CI (`.github/workflows/ci.yml`) runs the offline suite with coverage on every push and PR and fails the build on any test failure.
 
 ## Project structure
 

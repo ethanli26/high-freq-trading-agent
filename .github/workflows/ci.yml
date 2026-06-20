@@ -1,0 +1,33 @@
+name: CI
+
+# Run the offline test suite on every push and pull request.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies (offline test set)
+        run: |
+          python -m pip install --upgrade pip
+          # Only the deps the offline tests import — no broker/network/heavy libs,
+          # which keeps CI fast and reliable. (yfinance is import-only here.)
+          pip install pandas numpy python-dotenv yfinance
+          pip install -r requirements-dev.txt
+
+      - name: Run offline test suite with coverage
+        # Skip slow + network-marked tests so CI is deterministic and offline.
+        run: |
+          pytest -m "not slow and not network" \
+            --cov=risk --cov=signals --cov=factors --cov=backtest \
+            --cov-report=term-missing

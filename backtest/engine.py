@@ -96,6 +96,7 @@ def _build_panels(
     bars: dict[str, pd.DataFrame],
     master: pd.DatetimeIndex,
     strategies: list[Strategy],
+    liquidity_lookback: int = LIQUIDITY_LOOKBACK,
 ) -> dict[str, dict]:
     """Precompute indicators and per-strategy signals per symbol, aligned to master.
 
@@ -114,7 +115,7 @@ def _build_panels(
         # LOOK-AHEAD GUARD: a trailing mean of completed bars; read at p when used.
         if "Volume" in frame.columns:
             dollar_volume = close * frame["Volume"]
-            adv = dollar_volume.rolling(LIQUIDITY_LOOKBACK).mean().reindex(master).to_numpy(dtype=float)
+            adv = dollar_volume.rolling(liquidity_lookback).mean().reindex(master).to_numpy(dtype=float)
         else:
             adv = np.full(n_days, np.nan)
         signals = {
@@ -203,6 +204,11 @@ def run_engine(
     overlay: bool = OVERLAY_ENABLED,
     overlay_returns: np.ndarray | None = None,
     strategy_active=None,
+    slippage_fn=None,
+    min_dollar_volume: float | None = None,
+    min_price: float | None = None,
+    max_adv_participation: float | None = None,
+    liquidity_lookback: int | None = None,
 ) -> tuple[pd.Series, pd.DataFrame]:
     """Run the walk-forward backtest.
 
@@ -242,15 +248,32 @@ def run_engine(
         strategy_active: optional ``f(regime_label) -> set of active strategy names``;
             evaluated on the prior-day regime so only those strategies may fire that
             day (a regime-aware selector). None means all strategies are always active.
+        slippage_fn: optional ``f(symbol) -> per-side slippage fraction`` applied at
+            every fill instead of the flat ``slippage_pct``. Lets an asset class price
+            costs PER NAME (e.g. crypto, where thin coins pay far more). None keeps the
+            flat ``slippage_pct`` for every symbol (prior behavior).
+        min_dollar_volume / min_price / max_adv_participation / liquidity_lookback:
+            optional overrides for the liquidity filter's thresholds (default to the
+            config constants, i.e. prior behavior). A different asset class can retune
+            them — e.g. crypto needs no $5 price floor and a different ADV reference.
 
     Returns:
         ``(equity_curve, trades)`` — a daily equity Series and a trade-log DataFrame.
     """
     if strategies is None:
         strategies = [BreakoutStrategy()]  # default: breakout-only (prior behavior)
+    # Liquidity thresholds default to the config constants (unchanged behavior); an
+    # asset class may override them per run without touching global config.
+    min_dollar_volume = MIN_DOLLAR_VOLUME if min_dollar_volume is None else min_dollar_volume
+    min_price = MIN_PRICE if min_price is None else min_price
+    max_adv_participation = MAX_ADV_PARTICIPATION if max_adv_participation is None else max_adv_participation
+    liq_lookback = LIQUIDITY_LOOKBACK if liquidity_lookback is None else liquidity_lookback
+    # Per-side slippage: per-name when slippage_fn is given, else the flat rate.
+    def slip(symbol: str) -> float:
+        return slippage_fn(symbol) if slippage_fn is not None else slippage_pct
     master = regime.index
     n_days = len(master)
-    panels = _build_panels(bars, master, strategies)
+    panels = _build_panels(bars, master, strategies, liq_lookback)
     regime_arr = regime.to_numpy()
     top_ranks = _top_sectors_by_day(panels, [e for e in etf_symbols if e in panels], n_days)
 
@@ -339,7 +362,7 @@ def run_engine(
                 # so we don't model trades we couldn't realistically fill.
                 adv_p = panel["adv"][p]
                 if liquidity_filter:
-                    if np.isnan(adv_p) or adv_p < MIN_DOLLAR_VOLUME or panel["close"][p] < MIN_PRICE:
+                    if np.isnan(adv_p) or adv_p < min_dollar_volume or panel["close"][p] < min_price:
                         illiquid_skips += 1
                         continue
 
@@ -369,15 +392,15 @@ def run_engine(
                     risk_mult = 1.0
 
                 # Entry fills at today's open plus slippage (never the signal close).
-                entry_fill = open_i * (1.0 + slippage_pct)
+                entry_fill = open_i * (1.0 + slip(symbol))
                 stop = compute_stop(entry_fill, atr_p)                          # reuse risk/position
                 shares, _ = size_position(equity_prev, entry_fill, stop, risk_mult)  # 1% risk x conviction, 10% cap
                 if size_mult != 1.0:  # bear: scale the share size down
                     shares = int(math.floor(shares * size_mult))
-                # Liquidity cap: a position may not exceed MAX_ADV_PARTICIPATION of the
+                # Liquidity cap: a position may not exceed max_adv_participation of the
                 # name's average daily dollar volume (don't model unfillable size).
                 if liquidity_filter and entry_fill > 0:
-                    max_shares_adv = int(math.floor(MAX_ADV_PARTICIPATION * adv_p / entry_fill))
+                    max_shares_adv = int(math.floor(max_adv_participation * adv_p / entry_fill))
                     shares = min(shares, max_shares_adv)
                 if shares <= 0:
                     continue
@@ -456,7 +479,7 @@ def run_engine(
                 ma_p = panel["trend_ma"][p]
                 if (not np.isnan(ma_p) and not np.isnan(close_p)
                         and close_p < ma_p and not np.isnan(open_i)):
-                    exit_fill = open_i * (1.0 - slippage_pct)
+                    exit_fill = open_i * (1.0 - slip(symbol))
                     cash += position["shares"] * exit_fill - position["shares"] * commission_per_share
                     trades.append(_record_trade(position, i, exit_fill, "ma_break", master))
                     del book[symbol]
@@ -471,7 +494,7 @@ def run_engine(
                     raw = open_i
                 else:
                     raw = position["current_stop"]
-                exit_fill = raw * (1.0 - slippage_pct)
+                exit_fill = raw * (1.0 - slip(symbol))
                 cash += position["shares"] * exit_fill - position["shares"] * commission_per_share
                 if position["trend_mode"]:
                     reason = "chandelier_stop"
@@ -505,7 +528,7 @@ def run_engine(
         position = book[symbol]
         close_f = panels[symbol]["close"][final_i]
         price = position["last_close"] if np.isnan(close_f) else close_f
-        exit_fill = price * (1.0 - slippage_pct)
+        exit_fill = price * (1.0 - slip(symbol))
         cash += position["shares"] * exit_fill - position["shares"] * commission_per_share
         trades.append(_record_trade(position, final_i, exit_fill, "end_of_backtest", master))
         del book[symbol]
