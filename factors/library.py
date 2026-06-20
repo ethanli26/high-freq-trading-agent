@@ -5,8 +5,9 @@ date ``t`` uses only data up to and including ``t`` (look-ahead safe — see com
 The WorldQuant-style alphas are attributed to Kakushadze (2016), "101 Formulaic
 Alphas", arXiv:1601.00991, and kept deliberately simple.
 
-A fundamental factor (book-to-price) is declared to show the seam, but it requires a
-point-in-time provider the free data cannot honor, so it raises rather than fake it.
+The fundamental factor family (profitability, value, earnings growth) lives in
+``factors/fundamentals.py`` — it needs the point-in-time provider (Sharadar) and so is
+kept out of this free-data price/volume library.
 """
 
 import numpy as np
@@ -319,67 +320,3 @@ class ReturnSkewness(Factor):
         returns = data.close.pct_change(fill_method=None)
         # LOOK-AHEAD GUARD: rolling(250).skew ends at t (past only).
         return returns.rolling(250).skew()
-
-
-@register
-class BookToPrice(Factor):
-    """Book-to-price value factor — DECLARED but not runnable on free data.
-
-    A genuine value factor needs as-reported book value dated to its FILING date
-    (point-in-time). The free source cannot honor that, so ``compute`` raises rather
-    than fabricate look-ahead-tainted fundamentals. This shows the seam for a paid
-    point-in-time provider.
-    """
-
-    name = "book_to_price"
-    category = "fundamental"
-    requires = ("book_value", "close")
-    point_in_time_provider = True
-
-    def compute(self, data: FactorData) -> pd.DataFrame:
-        raise NotImplementedError(
-            "book_to_price needs point-in-time fundamentals (filing-dated book value). "
-            "Plug a paid provider (e.g. Sharadar SF1) into data/providers.FundamentalProvider.")
-
-
-@register
-class EarningsYield(Factor):
-    """Earnings yield (E/P) value factor — DECLARED, not runnable on free data.
-
-    Source: Basu (1977), JF (E/P effect); a core value factor. Rationale: cheap
-    (high E/P) stocks earn higher returns. Expected IC sign: POSITIVE. Cannot be
-    computed from price alone — it needs as-reported EPS dated to its FILING date, so
-    this raises until a point-in-time fundamental provider is wired (same seam as
-    book_to_price). Validation: US and internationally for value broadly.
-    """
-
-    name = "earnings_yield"
-    category = "fundamental"
-    requires = ("eps", "close")
-    point_in_time_provider = True
-
-    def compute(self, data: FactorData) -> pd.DataFrame:
-        raise NotImplementedError(
-            "earnings_yield needs point-in-time EPS (filing-dated). Wire a paid provider "
-            "into data/providers.FundamentalProvider; price alone cannot produce it.")
-
-
-@register
-class Profitability(Factor):
-    """Quality / profitability factor (gross profitability) — DECLARED, not runnable.
-
-    Source: Novy-Marx (2013), JFE (gross profits / assets). Rationale: more profitable
-    firms earn higher returns. Expected IC sign: POSITIVE. Needs filing-dated income
-    and balance-sheet items (point-in-time), so it raises until a paid provider is
-    wired. Validation: US (Novy-Marx 2013) and internationally.
-    """
-
-    name = "profitability"
-    category = "fundamental"
-    requires = ("gross_profit", "total_assets")
-    point_in_time_provider = True
-
-    def compute(self, data: FactorData) -> pd.DataFrame:
-        raise NotImplementedError(
-            "profitability needs point-in-time fundamentals (gross profit, assets). "
-            "Wire a paid provider into data/providers.FundamentalProvider.")

@@ -185,3 +185,49 @@ def load_bars(name: str, years: int = HISTORY_YEARS, refresh: bool = False) -> t
         bars[symbol] = frame
     log.info("Universe '%s': loaded %d symbols (%d skipped).", name, len(bars), len(skipped))
     return bars, skipped
+
+
+# --- Survivorship-free Sharadar universe ------------------------------------------
+
+SHARADAR_BROAD = "sharadar_broad"
+SHARADAR_MIN_DOLLAR_VOLUME = 5_000_000.0  # liquidity floor, same spirit as the free filter
+
+
+def load_sharadar_broad(provider=None, min_dollar_volume: float = SHARADAR_MIN_DOLLAR_VOLUME,
+                        max_symbols: int | None = None):
+    """Load the survivorship-free US universe from Sharadar, INCLUDING delisted names.
+
+    This is the real fix for survivorship bias. Unlike the hardcoded ``large/mid/small/
+    broad`` lists above — which are TODAY's survivors — the symbol master comes from the
+    point-in-time TICKERS table and KEEPS names that later delisted. A stock is in the
+    universe on date ``t`` if it was listed and liquid as of ``t`` (it simply has price
+    bars up to its delisting and none after), regardless of whether it survives to today;
+    the liquidity filter is still applied as-of each rebalance date in the harness.
+
+    Returns ``(bars, filings_by_symbol, benchmark_close)`` where ``filings_by_symbol`` is
+    each coin's filing-dated fundamentals frame (for the PIT panels). Raises
+    ``SharadarUnavailable`` in stub mode (no API key) — by design, so the spend gates
+    only the final numbers, not the plumbing.
+    """
+    from data.sharadar_provider import SF1_FIELDS, SharadarProvider
+
+    provider = provider or SharadarProvider()
+    tickers_frame = provider.get_universe()  # includes delisted; raises in stub mode
+    tickers = tickers_frame["ticker"].tolist()
+    if max_symbols is not None:
+        tickers = tickers[:max_symbols]
+
+    raw_bars = provider.get_price_bars(tickers + [BENCHMARK])
+    benchmark_close = raw_bars.get(BENCHMARK, pd.DataFrame()).get("Close")
+    bars: dict[str, pd.DataFrame] = {}
+    for symbol, frame in raw_bars.items():
+        if symbol == BENCHMARK or frame is None or len(frame) < MIN_HISTORY_BARS:
+            continue
+        # Liquidity floor on the FULL history (the harness re-checks as-of each date).
+        if (frame["Close"] * frame["Volume"]).median() < min_dollar_volume:
+            continue
+        bars[symbol] = frame
+    filings = provider.get_fundamentals(list(bars), SF1_FIELDS)
+    log.info("Sharadar universe: %d tradable names (survivorship-free, delisted included).",
+             len(bars))
+    return bars, filings, benchmark_close

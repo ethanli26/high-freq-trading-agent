@@ -22,10 +22,16 @@ import pandas as pd
 
 @dataclass
 class FactorData:
-    """Aligned ``date x symbol`` panels of free price/volume data.
+    """Aligned ``date x symbol`` panels of price/volume data, plus optional fundamentals.
 
     ``market`` is the benchmark (SPY) close as a date-indexed Series aligned to the
     panels — supplied for factors that need a market reference (beta, idio vol).
+
+    ``fundamentals`` is an optional ``{field: date x symbol DataFrame}`` of POINT-IN-TIME
+    fundamentals. Each panel is built by placing a filing's value on its FILING date
+    (datekey) and forward-filling, so ``fundamentals[field].loc[t]`` reflects only
+    statements filed on or before ``t`` (no look-ahead). It is ``None`` on the free data
+    path, where fundamental factors are deferred (see ``point_in_time_provider``).
     """
 
     open: pd.DataFrame
@@ -34,6 +40,7 @@ class FactorData:
     close: pd.DataFrame
     volume: pd.DataFrame
     market: pd.Series | None = None
+    fundamentals: dict[str, pd.DataFrame] | None = None
 
 
 class Factor(ABC):

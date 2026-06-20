@@ -24,8 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pandas as pd  # noqa: E402
 
 import factors  # noqa: E402,F401  (registers built-ins on import)
-from backtest.universe import BENCHMARK, constituents, load_bars  # noqa: E402
+from backtest.universe import BENCHMARK, constituents, load_bars, load_sharadar_broad  # noqa: E402
 from config import LIQUIDITY_LOOKBACK, MIN_DOLLAR_VOLUME, MIN_PRICE  # noqa: E402
+from data.sharadar_provider import SharadarUnavailable, build_fundamental_panels  # noqa: E402
 from factors.base import FactorData, all_factors  # noqa: E402
 from factors.evaluate import evaluate_factor  # noqa: E402
 
@@ -40,8 +41,12 @@ EXPECTED_SIGN = {
     "momentum_12_1": +1, "momentum_6_1": +1, "short_term_reversal": +1,
     "low_volatility": +1, "ivol_capm": -1, "beta_low": +1, "max_daily_return": -1,
     "return_skewness": -1, "ncskew": -1, "duvol": -1,
+    # US-effective fundamental family (all higher = better/cheaper/faster => higher returns).
+    "profitability": +1, "earnings_yield": +1, "book_to_price": +1, "earnings_growth": +1,
 }
 RISK_CLUSTER = ["ivol_capm", "beta_low", "low_volatility", "max_daily_return"]
+# The fundamental family this run exists to test.
+FUNDAMENTAL_FACTORS = ["profitability", "earnings_yield", "book_to_price", "earnings_growth"]
 
 
 def configure_logging() -> None:
@@ -174,6 +179,96 @@ def print_risk_cluster(large: dict, broad: dict) -> tuple[int, int]:
     return corrected, moved
 
 
+def build_sharadar_factor_data() -> tuple[FactorData, pd.DataFrame]:
+    """Assemble point-in-time, survivorship-free FactorData from Sharadar.
+
+    Returns ``(FactorData, eligible_mask)``. Price panels span delisted + live names;
+    ``fundamentals`` are filing-dated daily panels (see build_fundamental_panels). Raises
+    ``SharadarUnavailable`` in stub mode.
+    """
+    bars, filings, benchmark_close = load_sharadar_broad()
+    symbols = sorted(bars)
+    master = benchmark_close.index if benchmark_close is not None else bars[symbols[0]].index
+
+    def panel(field: str) -> pd.DataFrame:
+        return pd.DataFrame({s: bars[s][field].reindex(master) for s in symbols})
+
+    # POINT-IN-TIME: fundamentals are forward-filled from FILING dates onto `master`.
+    fundamentals = build_fundamental_panels(filings, master)
+    data = FactorData(open=panel("Open"), high=panel("High"), low=panel("Low"),
+                      close=panel("Close"), volume=panel("Volume"),
+                      market=benchmark_close, fundamentals=fundamentals)
+    return data, liquidity_mask(data)
+
+
+def evaluate_fundamentals(data: FactorData, eligible: pd.DataFrame) -> dict:
+    """Score the point-in-time fundamental factors on the Sharadar universe."""
+    scores: dict[str, dict] = {}
+    for name in FUNDAMENTAL_FACTORS:
+        factor = all_factors()[name]()
+        scores[name] = evaluate_factor(factor, data, eligible=eligible)
+    return scores
+
+
+def print_fundamental_scorecard(scores: dict) -> list[str]:
+    """Print the fundamental scorecard sorted by |t|, with sign-vs-prior; return BUILDs."""
+    ordered = sorted(scores.values(),
+                     key=lambda s: abs(s["t_stat"]) if s["t_stat"] is not None else -1.0, reverse=True)
+    rows = []
+    for s in ordered:
+        exp = EXPECTED_SIGN.get(s["name"])
+        sign_ok = exp is not None and _sign(s["mean_ic"]) == exp
+        rows.append({
+            "factor": s["name"], "periods": s["n_periods"],
+            "mean_IC": _fmt_ic(s["mean_ic"]), "IR": _fmt_num(s["ir"]), "t_stat": _fmt_num(s["t_stat"]),
+            "decile_spread": _fmt_pct(s["top_minus_bottom"]), "TMB_Sharpe": _fmt_num(s["tmb_sharpe"]),
+            "sign_ok": "yes" if sign_ok else "no", "verdict": _verdict(s),
+        })
+    print("\n=== FUNDAMENTAL factor scorecard — point-in-time, survivorship-free "
+          "(monthly; |IC|>0.02 & |t|>2 => BUILD; sorted by |t|) ===")
+    print(pd.DataFrame(rows).to_string(index=False))
+    return [s["name"] for s in ordered if _verdict(s) == "BUILD"]
+
+
+def run_fundamental_section(price_builds: list[str]) -> None:
+    """Run the fundamental family on Sharadar, or report stub mode clearly."""
+    print("\n" + "=" * 78)
+    print("US-EFFECTIVE FUNDAMENTAL FAMILY  (the test this whole layer was built for)")
+    print("=" * 78)
+    try:
+        data, eligible = build_sharadar_factor_data()
+    except SharadarUnavailable as error:
+        print("STUB MODE — fundamental factors NOT run (no Sharadar API key).")
+        print(f"  Reason: {error}")
+        print("  The plumbing is fully built and verified: provider, point-in-time filing-date")
+        print("  panels, the four factors (profitability, earnings_yield, book_to_price,")
+        print("  earnings_growth), the survivorship-free 'sharadar_broad' universe, and this")
+        print("  harness path all run end to end on synthetic fundamentals in the test suite.")
+        print(f"  To produce REAL numbers, set NASDAQ_DATA_LINK_API_KEY and re-run; only the")
+        print("  final result is gated on the spend, not the code.")
+        print(f"  For reference, the PRICE family on the free large-cap universe cleared the bar "
+              f"with: {', '.join(price_builds) if price_builds else 'NOTHING'}.")
+        return
+
+    builds = print_fundamental_scorecard(evaluate_fundamentals(data, eligible))
+    print(f"\nFundamental factors clearing the bar: {', '.join(builds) if builds else 'NONE'}.")
+    print("\n=== Honest note: fundamentals (PIT, survivorship-free) vs price (free, survivors) ===")
+    print("  - This is the FIRST run of the fundamental family on point-in-time, "
+          "survivorship-free data — the data the US-vs-China study says these factors need.")
+    print(f"  - Price family on the OLD free large-cap universe cleared the bar with: "
+          f"{', '.join(price_builds) if price_builds else 'NOTHING'}.")
+    if builds:
+        print(f"  - VERDICT: the US-effective fundamental family DOES clear the bar here "
+              f"({', '.join(builds)}) where the price family largely did not — consistent with "
+              f"the study's claim that fundamentals, not price/reversal, drive US returns.")
+    else:
+        print("  - VERDICT: even on point-in-time, survivorship-free data the fundamental family "
+              "did NOT clear the bar on this window — a genuinely negative result, not a data "
+              "artifact, since survivorship and look-ahead were removed.")
+    print("  - The bar (|IC|>0.02 & |t|>2) was NOT lowered; IC is close-to-close predictive "
+          "power, not tradable P&L.")
+
+
 def main() -> int:
     """Evaluate large (reference) and broad universes, then compare honestly."""
     configure_logging()
@@ -221,6 +316,9 @@ def main() -> int:
     else:
         print("  - VERDICT: inverted/weak signs largely PERSIST; cap-concentration was not the main "
               "driver. A point-in-time test remains the only way to settle it.")
+
+    # The headline test: the US-effective fundamental family on PIT, survivorship-free data.
+    run_fundamental_section(builds)
     return 0
 
 

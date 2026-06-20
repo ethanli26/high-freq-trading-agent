@@ -4,4 +4,4 @@ Importing this package registers the built-in factors so the IC harness can scor
 them automatically.
 """
 
-from factors import library  # noqa: F401  (registers factors on import)
+from factors import fundamentals, library  # noqa: F401  (registers factors on import)
